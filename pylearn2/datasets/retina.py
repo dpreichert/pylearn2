@@ -207,15 +207,7 @@ def decode(dense_X, img_shp, rings):
 
 
 class RetinaEncodingBlock(object):
-    """
-    .. todo::
 
-        WRITEME
-
-    Parameters
-    ----------
-    rings : WRITEME
-    """
     def __init__(self, rings):
         self.rings = rings
 
@@ -230,16 +222,7 @@ class RetinaEncodingBlock(object):
 
 
 class RetinaDecodingBlock(object):
-    """
-    .. todo::
 
-        WRITEME
-
-    Parameters
-    ----------
-    img_shp : WRITEME
-    rings : WRITEME
-    """
     def __init__(self, img_shp, rings):
         self.img_shp = img_shp
         self.rings = rings
@@ -254,18 +237,15 @@ class RetinaDecodingBlock(object):
 
 
 class RetinaCodingViewConverter(DefaultViewConverter):
-    """
-    .. todo::
 
-        WRITEME
-
-    Parameters
-    ----------
-    shape : iterable
-        List or tuple of three ints: rows, cols, channels
-    rings : WRITEME
-    """
     def __init__(self, shape, rings):
+        """
+        Parameters
+        ----------
+        shape : iterable
+            List or tuple of three ints: rows, cols, channels
+        rings : WRITEME
+        """
         self.shape = shape
         self.rings = rings
 

@@ -9,7 +9,7 @@ import logging
 import theano.tensor as T
 from theano.sandbox import cuda
 
-from pylearn2.models.mlp import Layer, BadInputSpaceError, MLP, max_pool, mean_pool
+from pylearn2.models.mlp import Layer, BadInputSpaceError, MLP, max_pool, mean_pool, Sigmoid
 from pylearn2.models.maxout import MaxoutConvC01B
 from pylearn2.space import CompositeSpace, Conv2DSpace, VectorSpace
 from pylearn2.models.model import Model
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 class FlexLayer(Layer):
     """
     An attempt to unify and generalize the various mlp layers. Intended usage is
-    (all operations optional):
+    (all operations optional [apart from transform]):
 
     * take input state, living in self.input_space;
     * convert to self.desired_input_space as required by subsequent operations;
@@ -42,8 +42,16 @@ class FlexLayer(Layer):
     * apply space-preserving operation (e.g. normalization) self.pre_activation_op;
     * apply activation function self.activation_function (e.g. sigmoid).
     * apply space-preserving operation (e.g. normalization) self.post_activation_op.
+
+    'transform': Instead of inherting from FlexLayer and overriding the transform
+    method, the transformation can be passed as argument, for convenience. transform
+    is the only op implemented as class method because the transformation is what
+    usually requires most extra machinery, thus it makes sense to use inheritance
+    [initially I just assigned a class method to self.transform, but that causes
+    pickle problems.]
     """
     def __init__(self,
+                 layer_name,
                  input_space=None,
                  desired_input_space=None,
                  input_op=None,
@@ -51,15 +59,39 @@ class FlexLayer(Layer):
                  pre_activation_op=None,
                  activation_function=None,
                  post_activation_op=None):
+
+        # Note that the layer abstract class does not have layer_name,
+        # but all derived layers do and the mlp class assumes it's there, too,
+        # so I'm adding it here.
+        self.layer_name = layer_name
+
         super(FlexLayer, self).__init__()
         self.input_space = input_space
         self.desired_input_space = desired_input_space
         self.input_op = input_op
-        self.transform = transform
+        if transform is not None:
+            self.transform = transform
         self.pre_activation_op = pre_activation_op
         self.activation_function = activation_function
         self.post_activation_op = post_activation_op
 
+    def transform(self, state_below):
+        """
+        Does the forward prop transformation for this layer.
+
+        Parameters
+        ----------
+        state_below : member of self.desired_input_space
+            A minibatch of states of the layer below, formatted to lie in
+            a space compatible with the transformation.
+
+        Returns
+        -------
+        state : member of self.output_space
+            A minibatch of states of this layer, before any activation function
+            or further operations are applied.
+        """
+        raise NotImplementedError(str(type(self))+" does not implement transform.")
 
     def set_input_space(self, space):
         """
@@ -118,11 +150,14 @@ class NoParamLayer(FlexLayer):
     def get_weight_decay(self, coeff):
         return 0.
 
+    # There's an interface mismatch: the model base class wants a data
+    # argument but the mlp layers implement get_monitoring_channels without it.
+    def get_monitoring_channels(self):
+        return OrderedDict()
 
 
-def apply_parallel_layers(layers, state_below):
-    return tuple(layer.fprop(component_state) for
-          layer, component_state in safe_zip(layers, state_below))
+
+
 
 
 class ParallelLayer(FlexLayer):
@@ -143,10 +178,8 @@ class ParallelLayer(FlexLayer):
 
         layers: a list or tuple of Layers.
         """
-        self.layer_name = layer_name
         self.layers = layers
-        super(ParallelLayer, self).__init__(
-            transform=apply_parallel_layers, **kwargs)
+        super(ParallelLayer, self).__init__(layer_name, **kwargs)
 
     @wraps(Layer.set_input_space)
     def set_input_space(self, space):
@@ -160,6 +193,11 @@ class ParallelLayer(FlexLayer):
 
         self.output_space = CompositeSpace(tuple(layer.get_output_space()
             for layer in self.layers))
+
+    @functools.wraps(FlexLayer.transform)
+    def transform(self, state_below):
+        return tuple(layer.fprop(component_state) for
+                     layer, component_state in safe_zip(self.layers, state_below))
 
     @wraps(Layer.get_params)
     def get_params(self):
@@ -202,22 +240,24 @@ class ParallelLayer(FlexLayer):
 
         return decay
 
+    def get_monitoring_channels(self):
+        channels = self.layers[0].get_monitoring_channels()
+        for layer in self.layers[1:]:
+            channels.update(layer.get_monitoring_channels())
+        return channels
 
-def elem_sum(state_below):
-    out = state_below[0]
 
-    for state in state_below[1:]:
-        out = out + state
-    return out
+    @wraps(Layer.censor_updates)
+    def censor_updates(self, updates):
+        for layer in self.layers:
+            layer.censor_updates(updates)
 
-class ElemSumLayer(FlexLayer):
+
+
+class ElemSumLayer(NoParamLayer):
     """
     Adds the inputs coming from a composite space elementwise. Has no parameters.
     """
-    def __init__(self, layer_name, **kwargs):
-        self.layer_name = layer_name
-        super(ElemSumLayer, self).__init__(
-            transform=elem_sum, **kwargs)
 
     def set_input_space(self, space):
         logger.info('Layer %s', self.layer_name)
@@ -235,14 +275,121 @@ class ElemSumLayer(FlexLayer):
         self.input_space = space
         self.output_space = first_component
 
-    def get_params(self):
-        return []
+    @functools.wraps(FlexLayer.transform)
+    def transform(self, state_below):
+        out = state_below[0]
 
-    def get_l1_weight_decay(self):
-        return 0.
+        for state in state_below[1:]:
+            out = out + state
+        return out
 
-    def get_weight_decay(self, coeff):
-        return 0.
+
+class SplitChannelsLayer(NoParamLayer):
+    """
+    Split channels of a Conv2D input space into separate
+    Conv2DSpaces in a CompositeSpace.
+
+    num_splits: Number of output components. If None (default),
+    split each channel, i.e. num_splits = num_channels of input space.
+    """
+    def __init__(self,
+                 layer_name,
+                 num_splits=None,
+                 **kwargs):
+        super(SplitChannelsLayer, self).__init__(layer_name, **kwargs)
+        self.num_splits = num_splits
+
+
+    def set_input_space(self, space):
+        logger.info('Layer %s', self.layer_name)
+
+        if not isinstance(space, Conv2DSpace):
+            raise BadInputSpaceError("SplitChannelLayer.set_input_space "
+                                     "expected a Conv2DSpace, got " +
+                                     str(space) + " of type " +
+                                     str(type(space)))
+        if self.num_splits is None:
+            self.num_splits = space.num_channels
+        else:
+            if self.num_splits > space.num_channels:
+                raise ValueError('self.num_splits > input_space.num_channels.')
+            if space.num_channels % self.num_splits != 0:
+                warnings.warn('Number of channels not divisible by number of splits;'
+                              ' last split will have extra channels.')
+
+        self.input_space = space
+        self.desired_input_space = space
+
+        output_components = [Conv2DSpace(
+            space.shape, axes=space.axes, num_channels=space.num_channels // self.num_splits)
+                             for i_split in range(self.num_splits - 1)]
+        output_components.append(
+            Conv2DSpace(
+                space.shape, axes=space.axes,
+                num_channels=space.num_channels // self.num_splits +
+                space.num_channels % self.num_splits))
+        channels_covered = 0
+        for component in output_components:
+            channels_covered += component.num_channels
+        assert channels_covered == space.num_channels
+
+        self.output_space = CompositeSpace(output_components)
+
+
+
+    @functools.wraps(FlexLayer.transform)
+    def transform(self, state_below):
+        channel_axis = self.input_space.axes.index('c')
+        splits_size = [component.num_channels for
+                       component in self.output_space.components]
+        return tuple(T.split(state_below, splits_size, self.num_splits, axis=channel_axis))
+
+
+
+class PairwiseMultLayer(NoParamLayer):
+    """
+    Multiply adjacent channels in a Conv2D input space (non-overlapping pairs).
+
+    """
+    def set_input_space(self, space):
+        logger.info('Layer %s', self.layer_name)
+
+        if not isinstance(space, Conv2DSpace):
+            raise BadInputSpaceError("PairwiseMultLayer.set_input_space "
+                                     "expected a Conv2DSpace, got " +
+                                     str(space) + " of type " +
+                                     str(type(space)))
+        if space.num_channels % 2 != 0:
+            raise BadInputSpaceError('Number of channels not divisible by two.')
+
+        self.input_space = space
+        self.desired_input_space = space
+        self.output_space = Conv2DSpace(
+            space.shape, axes=space.axes, num_channels=space.num_channels / 2)
+
+    @functools.wraps(FlexLayer.transform)
+    def transform(self, state_below):
+        channel_axis = self.input_space.axes.index('c')
+        #row_axis = self.input_space.axes.index(0)
+        #num_rows = self.input_space.shape[0]
+        #num_splits = self.input_space.num_channels / 2
+        #splits_size = [2 for _ in range(num_splits)]
+        #splits = T.split(state_below, splits_size, num_splits, axis=channel_axis)
+        #tall_state = T.concatenate(splits, row_axis)
+        #tall_state_multiplied = tall_state.prod(axis=channel_axis, keepdims=True)
+        ## This should be a reshape (would need to ensure correct ordering)
+        #splits_size = [num_rows for _ in range(num_splits)]
+        #out = T.split(tall_state_multiplied, splits_size, num_splits, axis=row_axis)
+        #out = T.concatenate(out, channel_axis)
+        #return out
+        slices_even = [slice(None), slice(None), slice(None), slice(None)]
+        slices_odd = [slice(None), slice(None), slice(None), slice(None)]
+        slices_even[channel_axis] = slice(None, None, 2)
+        slices_odd[channel_axis] = slice(1, None, 2)
+        # Theano doesn't accept state_below[slices] like numpy?
+        return state_below[slices_even[0], slices_even[1], slices_even[2], slices_even[3]] *\
+               state_below[slices_odd[0], slices_odd[1], slices_odd[2], slices_odd[3]]
+
 
 
 
@@ -271,9 +418,9 @@ class DenseLinear(FlexLayer):
                  use_bias=True,
                  **kwargs):
 
-        super(DenseLinear, self).__init__(
-            transform=self._linear_part, **kwargs)
+        super(DenseLinear, self).__init__(layer_name, **kwargs)
         del kwargs
+        del layer_name
 
         if use_bias and init_bias is None:
             init_bias = 0.
@@ -283,7 +430,7 @@ class DenseLinear(FlexLayer):
 
         if use_bias:
             self.b = sharedX(np.zeros((self.dim,)) + init_bias,
-                             name=(layer_name + '_b'))
+                             name=(self.layer_name + '_b'))
         else:
             assert b_lr_scale is None
             init_bias is None
@@ -571,8 +718,8 @@ class DenseLinear(FlexLayer):
         else:
             return T.sqr(Y - Y_hat)
 
-
-    def _linear_part(self, state_below):
+    @functools.wraps(FlexLayer.transform)
+    def transform(self, state_below):
         """
         Parameters
         ----------
@@ -633,9 +780,9 @@ class ConvLinearBC01(FlexLayer):
     """
 
     def __init__(self,
+                 layer_name,
                  output_channels,
                  kernel_shape,
-                 layer_name,
                  irange=None,
                  border_mode='valid',
                  sparse_init=None,
@@ -647,9 +794,9 @@ class ConvLinearBC01(FlexLayer):
                  kernel_stride=(1, 1),
                  **kwargs):
 
-        super(ConvLinearBC01, self).__init__(
-            transform=self._linear_part, **kwargs)
+        super(ConvLinearBC01, self).__init__(layer_name, **kwargs)
         del kwargs
+        del layer_name
 
         if (irange is None) and (sparse_init is None):
             raise AssertionError("You should specify either irange or "
@@ -844,8 +991,53 @@ class ConvLinearBC01(FlexLayer):
                             ('kernel_norms_mean', row_norms.mean()),
                             ('kernel_norms_max',  row_norms.max()), ])
 
-    @wraps(Layer.fprop)
-    def _linear_part(self, state_below):
+
+    @functools.wraps(Layer.get_monitoring_channels_from_state)
+    def get_monitoring_channels_from_state(self, state):
+        # The standard ConvRectifiedLinear does not implement this but the other
+        # layers do, so I'm including it.
+        # Note that this are prepooling states, the standard mlp layers report
+        # post pooling states.
+
+        P = state
+
+        rval = OrderedDict()
+
+        vars_and_prefixes = [(P, '')]
+
+        for var, prefix in vars_and_prefixes:
+            assert var.ndim == 4
+            v_max = var.max(axis=(1, 2, 3))
+            v_min = var.min(axis=(1, 2, 3))
+            v_mean = var.mean(axis=(1, 2, 3))
+            v_range = v_max - v_min
+
+            # max_x.mean_u is "the mean over *u*nits of the max over
+            # e*x*amples" The x and u are included in the name because
+            # otherwise its hard to remember which axis is which when reading
+            # the monitor I use inner.outer rather than outer_of_inner or
+            # something like that because I want mean_x.* to appear next to
+            # each other in the alphabetical list, as these are commonly
+            # plotted together
+            for key, val in [('max_x.max_u',    v_max.max()),
+                             ('max_x.mean_u',   v_max.mean()),
+                             ('max_x.min_u',    v_max.min()),
+                             ('min_x.max_u',    v_min.max()),
+                             ('min_x.mean_u',   v_min.mean()),
+                             ('min_x.min_u',    v_min.min()),
+                             ('range_x.max_u',  v_range.max()),
+                             ('range_x.mean_u', v_range.mean()),
+                             ('range_x.min_u',  v_range.min()),
+                             ('mean_x.max_u',   v_mean.max()),
+                             ('mean_x.mean_u',  v_mean.mean()),
+                             ('mean_x.min_u',   v_mean.min())]:
+                rval[prefix+key] = val
+
+        return rval
+
+
+    @functools.wraps(FlexLayer.transform)
+    def transform(self, state_below):
         # This is very similar to the dense layer linear part (apart from extra stuff
         # like optional biases or 'softmax columns') and could be further unified.
 
@@ -866,9 +1058,9 @@ class ConvLinearC01B(FlexLayer):
 
     """
     def __init__(self,
+                 layer_name,
                  num_channels,
                  kernel_shape,
-                 layer_name,
                  irange=None,
                  init_bias=0.,
                  W_lr_scale=None,
@@ -881,9 +1073,9 @@ class ConvLinearC01B(FlexLayer):
                  kernel_stride=(1, 1),
                  **kwargs):
 
-        super(ConvLinearC01B, self).__init__(
-            transform=self._linear_part, **kwargs)
+        super(ConvLinearC01B, self).__init__(layer_name, **kwargs)
         del kwargs
+        del layer_name
 
         detector_channels = num_channels
 
@@ -1023,8 +1215,8 @@ class ConvLinearC01B(FlexLayer):
                             ('kernel_norms_mean', row_norms.mean()),
                             ('kernel_norms_max',  row_norms.max()), ])
 
-    @functools.wraps(Layer.fprop)
-    def _linear_part(self, state_below):
+    @functools.wraps(FlexLayer.transform)
+    def transform(self, state_below):
         check_cuda(str(type(self)))
 
         # Alex's code requires # input channels to be <= 3 or a multiple of 4
@@ -1054,20 +1246,14 @@ class ConvLinearC01B(FlexLayer):
 
     @functools.wraps(Model.get_weights_view_shape)
     def get_weights_view_shape(self):
-        total = self.detector_channels
-        cols = self.num_pieces
-        if cols == 1:
-            # Let the PatchViewer decide how to arrange the units
-            # when they're not pooled
-            raise NotImplementedError()
-        # When they are pooled, make each pooling unit have one row
-        rows = total // cols
-        if rows * cols < total:
-            rows = rows + 1
-        return rows, cols
+        # Let the PatchViewer decide how to arrange the units
+        # when they're not pooled
+        raise NotImplementedError()
 
     @functools.wraps(Layer.get_monitoring_channels_from_state)
     def get_monitoring_channels_from_state(self, state):
+        # Note that this are prepooling states, the standard mlp layers report
+        # post pooling states.
 
         P = state
 
@@ -1115,7 +1301,7 @@ class PoolBC10(NoParamLayer):
                  layer_name,
                  pool_type='max',
                  **kwargs):
-        super(PoolBC10, self).__init__(**kwargs)
+        super(PoolBC10, self).__init__(layer_name, **kwargs)
         self.pool_shape = pool_shape
         self.pool_stride = pool_stride
         self.layer_name = layer_name
@@ -1144,23 +1330,7 @@ class PoolBC10(NoParamLayer):
             dummy_batch_size = 2
         dummy_input = sharedX(
             self.desired_input_space.get_origin_batch(dummy_batch_size))
-
-        if self.pool_type == 'max':
-            def transform(bc01):
-                return max_pool(bc01=bc01,
-                               pool_shape=self.pool_shape,
-                               pool_stride=self.pool_stride,
-                               image_shape=self.desired_input_space.shape)
-            self.transform = transform
-            dummy_p = self.transform(dummy_input)
-        elif self.pool_type == 'mean':
-            def transform(bc01):
-                return mean_pool(bc01=bc01,
-                               pool_shape=self.pool_shape,
-                               pool_stride=self.pool_stride,
-                               image_shape=self.desired_input_space.shape)
-            self.transform = transform
-            dummy_p = self.transform(dummy_input)
+        dummy_p = self.transform(dummy_input)
         dummy_p = dummy_p.eval()
 
         self.output_space = Conv2DSpace(shape=[dummy_p.shape[2],
@@ -1169,6 +1339,18 @@ class PoolBC10(NoParamLayer):
                                         axes=('b', 'c', 0, 1))
 
         logger.info('Output shape: %s', self.output_space.shape)
+
+    def transform(self, bc01):
+        if self.pool_type == 'max':
+            return max_pool(bc01=bc01,
+                            pool_shape=self.pool_shape,
+                            pool_stride=self.pool_stride,
+                            image_shape=self.desired_input_space.shape)
+        elif self.pool_type == 'mean':
+            return mean_pool(bc01=bc01,
+                             pool_shape=self.pool_shape,
+                             pool_stride=self.pool_stride,
+                             image_shape=self.desired_input_space.shape)
 
 
 class MaxPoolC01B(NoParamLayer):
@@ -1182,10 +1364,9 @@ class MaxPoolC01B(NoParamLayer):
                  fix_pool_shape=False,
                  fix_pool_stride=False,
                  **kwargs):
-        super(MaxPoolC01B, self).__init__(**kwargs)
+        super(MaxPoolC01B, self).__init__(layer_name, **kwargs)
         self.pool_shape = pool_shape
         self.pool_stride = pool_stride
-        self.layer_name = layer_name
         self.fix_pool_shape = fix_pool_shape
         self.fix_pool_stride = fix_pool_stride
 
@@ -1254,16 +1435,6 @@ class MaxPoolC01B(NoParamLayer):
         dummy_input = sharedX(
             self.dummy_space.get_origin_batch(2)[0:16, :, :, :])
 
-        def transform(c01b):
-            if self.dummy_channels > 0:
-                zeros = T.zeros_like(c01b[0:self.dummy_channels, :, :, :])
-                c01b = T.concatenate((c01b, zeros), axis=0)
-            return max_pool_c01b(c01b=c01b,
-                                 pool_shape=self.pool_shape,
-                                 pool_stride=self.pool_stride,
-                                 image_shape=self.desired_input_space.shape)
-
-        self.transform = transform
         dummy_p = self.transform(dummy_input)
         dummy_p = dummy_p.eval()
         self.output_space = Conv2DSpace(
@@ -1274,7 +1445,322 @@ class MaxPoolC01B(NoParamLayer):
 
         logger.info('Output space: %s', self.output_space.shape)
 
+    def transform(self, c01b):
+        if self.dummy_channels > 0:
+            zeros = T.zeros_like(c01b[0:self.dummy_channels, :, :, :])
+            c01b = T.concatenate((c01b, zeros), axis=0)
+        return max_pool_c01b(c01b=c01b,
+                             pool_shape=self.pool_shape,
+                             pool_stride=self.pool_stride,
+                             image_shape=self.desired_input_space.shape)
 
+
+
+class MinNormConvLinearC01B(ConvLinearC01B):
+    """
+    Like ConvLinearC01B but also provides min_kernel_norm.
+    """
+    def __init__(self, *args, **kwargs):
+        if "min_kernel_norm" in kwargs:
+            self.min_kernel_norm = kwargs.pop("min_kernel_norm")
+
+        else:
+            self.min_kernel_norm = None
+
+        super(MinNormConvLinearC01B, self).__init__(*args, **kwargs)
+
+
+    def censor_updates(self, updates):
+        """
+        .. todo::
+
+            WRITEME
+        """
+
+        if self.max_kernel_norm is not None or self.min_kernel_norm is not None:
+
+            W ,= self.transformer.get_params()
+            if W in updates:
+                updated_W = updates[W]
+                row_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=(0,1,2)))
+                if self.max_kernel_norm is None:
+                    max_kernel_norm = row_norms.max()
+                else:
+                    max_kernel_norm = self.max_kernel_norm
+                if self.min_kernel_norm is None:
+                    min_kernel_norm = 0
+                else:
+                    min_kernel_norm = self.min_kernel_norm
+
+                desired_norms = T.clip(row_norms, min_kernel_norm,
+                                       max_kernel_norm)
+                updates[W] = updated_W * (
+                    desired_norms / (1e-7 + row_norms)).dimshuffle('x', 'x', 'x', 0)
+
+
+
+class ConvSigmoidC01B(ConvLinearC01B):
+    """
+    Convolutional layer with sigmoid activation function and the costs/monitoring
+    channels of the mlp Sigmoid layer (for the 'detection' monitoring style).
+
+    [I think the cost should perhaps be factored out from the layers. Then I wouldn't
+    have to write a new class for this (but refactoring might take some work; for example,
+    the dropout cost assumes that the underlying cost is provided by the mlp, which
+    assumes a cost being provided by the last layer).]
+    """
+    def __init__(self, layer_name, **kwargs):
+        if 'activation_function' in kwargs:
+            raise TypeError('activation_function parameter is superfluous, '
+                            'ConvSigmoid already provides the function.')
+        super(ConvSigmoidC01B, self).__init__(
+            layer_name, activation_function=T.nnet.sigmoid, **kwargs)
+
+
+    def kl(self, Y, Y_hat):
+        """
+        Returns a batch (vector) of mean across units of KL divergence for
+        each example KL(P || Q) where P is defined by Y and Q is defined
+        by Y_hat. See mlp.Sigmoid for details.
+
+        I need to reimplement this here because the mlp.Sigmoid assumes
+        states living in a VectorSpace.
+        """
+        # DPR: added checks
+        self.output_space.validate(Y)
+        self.output_space.validate(Y_hat)
+
+        # Pull out the argument to the sigmoid
+        assert hasattr(Y_hat, 'owner')
+        owner = Y_hat.owner
+        assert owner is not None
+        op = owner.op
+
+        if not hasattr(op, 'scalar_op'):
+            raise ValueError("Expected Y_hat to be generated by an Elemwise "
+                             "op, got "+str(op)+" of type "+str(type(op)))
+        assert isinstance(op.scalar_op, T.nnet.sigm.ScalarSigmoid)
+        z, = owner.inputs
+
+        term_1 = Y * T.nnet.softplus(-z)
+        term_2 = (1 - Y) * T.nnet.softplus(z)
+
+        total = term_1 + term_2
+
+        # DPR: only part modified:
+        batch_axis = self.output_space.axes.index('b')
+        mean_axes = range(4)
+        mean_axes.remove(batch_axis)
+        ave = total.mean(axis=mean_axes)
+
+        assert ave.ndim == 1
+
+        return ave
+
+
+    def cost(self, Y, Y_hat):
+
+        #Sigm
+        total = self.kl(Y=Y, Y_hat=Y_hat)
+
+        ave = total.mean()
+
+        return ave
+
+    def get_detection_channels_from_state(self, state, target):
+        """
+        .. todo::
+
+            WRITEME
+        """
+        batch_axis = self.output_space.axes.index('b')
+
+        rval = OrderedDict()
+        y_hat = state > 0.5
+        y = target > 0.5
+        wrong_bit = T.cast(T.neq(y, y_hat), state.dtype)
+        rval['01_loss'] = wrong_bit.mean()
+        rval['kl'] = self.cost(Y_hat=state, Y=target)
+
+        y = T.cast(y, state.dtype)
+        y_hat = T.cast(y_hat, state.dtype)
+        tp = (y * y_hat).sum()
+        fp = ((1-y) * y_hat).sum()
+        precision = tp / T.maximum(1., tp + fp)
+        recall = tp / T.maximum(1., y.sum())
+        rval['precision'] = precision
+        rval['recall'] = recall
+        rval['f1'] = 2. * precision * recall / T.maximum(1, precision + recall)
+
+        tp = (y * y_hat).sum(axis=batch_axis)
+        fp = ((1-y) * y_hat).sum(axis=batch_axis)
+        precision = tp / T.maximum(1., tp + fp)
+
+        rval['per_output_precision.max'] = precision.max()
+        rval['per_output_precision.mean'] = precision.mean()
+        rval['per_output_precision.min'] = precision.min()
+
+        recall = tp / T.maximum(1., y.sum(axis=batch_axis))
+
+        rval['per_output_recall.max'] = recall.max()
+        rval['per_output_recall.mean'] = recall.mean()
+        rval['per_output_recall.min'] = recall.min()
+
+        f1 = 2. * precision * recall / T.maximum(1, precision + recall)
+
+        rval['per_output_f1.max'] = f1.max()
+        rval['per_output_f1.mean'] = f1.mean()
+        rval['per_output_f1.min'] = f1.min()
+
+        return rval
+
+    def get_monitoring_channels_from_state(self, state, target=None):
+        rval = super(ConvSigmoidC01B, self).get_monitoring_channels_from_state(
+            state)
+
+        if target is not None:
+                rval.update(self.get_detection_channels_from_state(
+                    state, target))
+        return rval
+
+
+
+
+
+#todo: find non redundant solution (with C01B version)
+class ConvSigmoidBC01(ConvLinearBC01):
+    """
+    Convolutional layer with sigmoid activation function and the costs/monitoring
+    channels of the mlp Sigmoid layer (for the 'detection' monitoring style).
+
+    [I think the cost should perhaps be factored out from the layers. Then I wouldn't
+    have to write a new class for this (but refactoring might take some work; for example,
+    the dropout cost assumes that the underlying cost is provided by the mlp, which
+    assumes a cost being provided by the last layer).]
+    """
+    def __init__(self, layer_name, **kwargs):
+        if 'activation_function' in kwargs:
+            raise TypeError('activation_function parameter is superfluous, '
+                            'ConvSigmoid already provides the function.')
+        super(ConvSigmoidBC01, self).__init__(
+            layer_name, activation_function=T.nnet.sigmoid, **kwargs)
+
+
+    def kl(self, Y, Y_hat):
+        """
+        Returns a batch (vector) of mean across units of KL divergence for
+        each example KL(P || Q) where P is defined by Y and Q is defined
+        by Y_hat. See mlp.Sigmoid for details.
+
+        I need to reimplement this here because the mlp.Sigmoid assumes
+        states living in a VectorSpace.
+        """
+        # DPR: added checks
+        self.output_space.validate(Y)
+        self.output_space.validate(Y_hat)
+
+        # Pull out the argument to the sigmoid
+        assert hasattr(Y_hat, 'owner')
+        owner = Y_hat.owner
+        assert owner is not None
+        op = owner.op
+
+        if not hasattr(op, 'scalar_op'):
+            raise ValueError("Expected Y_hat to be generated by an Elemwise "
+                             "op, got "+str(op)+" of type "+str(type(op)))
+        assert isinstance(op.scalar_op, T.nnet.sigm.ScalarSigmoid)
+        z, = owner.inputs
+
+        term_1 = Y * T.nnet.softplus(-z)
+        term_2 = (1 - Y) * T.nnet.softplus(z)
+
+        total = term_1 + term_2
+
+        # DPR: only part modified:
+        batch_axis = self.output_space.axes.index('b')
+        mean_axes = range(4)
+        mean_axes.remove(batch_axis)
+        ave = total.mean(axis=mean_axes)
+
+        assert ave.ndim == 1
+
+        return ave
+
+
+    def cost(self, Y, Y_hat):
+
+        #Sigm
+        total = self.kl(Y=Y, Y_hat=Y_hat)
+
+        ave = total.mean()
+
+        return ave
+
+    def get_detection_channels_from_state(self, state, target):
+        """
+        .. todo::
+
+            WRITEME
+        """
+        batch_axis = self.output_space.axes.index('b')
+
+        rval = OrderedDict()
+        y_hat = state > 0.5
+        y = target > 0.5
+        wrong_bit = T.cast(T.neq(y, y_hat), state.dtype)
+        rval['01_loss'] = wrong_bit.mean()
+        rval['kl'] = self.cost(Y_hat=state, Y=target)
+
+        y = T.cast(y, state.dtype)
+        y_hat = T.cast(y_hat, state.dtype)
+        tp = (y * y_hat).sum()
+        fp = ((1-y) * y_hat).sum()
+        precision = tp / T.maximum(1., tp + fp)
+        recall = tp / T.maximum(1., y.sum())
+        rval['precision'] = precision
+        rval['recall'] = recall
+        rval['f1'] = 2. * precision * recall / T.maximum(1, precision + recall)
+
+        tp = (y * y_hat).sum(axis=batch_axis)
+        fp = ((1-y) * y_hat).sum(axis=batch_axis)
+        precision = tp / T.maximum(1., tp + fp)
+
+        rval['per_output_precision.max'] = precision.max()
+        rval['per_output_precision.mean'] = precision.mean()
+        rval['per_output_precision.min'] = precision.min()
+
+        recall = tp / T.maximum(1., y.sum(axis=batch_axis))
+
+        rval['per_output_recall.max'] = recall.max()
+        rval['per_output_recall.mean'] = recall.mean()
+        rval['per_output_recall.min'] = recall.min()
+
+        f1 = 2. * precision * recall / T.maximum(1, precision + recall)
+
+        rval['per_output_f1.max'] = f1.max()
+        rval['per_output_f1.mean'] = f1.mean()
+        rval['per_output_f1.min'] = f1.min()
+
+        return rval
+
+    def get_monitoring_channels_from_state(self, state, target=None):
+        rval = super(ConvSigmoidBC01, self).get_monitoring_channels_from_state(
+            state)
+
+        if target is not None:
+                rval.update(self.get_detection_channels_from_state(
+                    state, target))
+        return rval
+
+
+
+def rectify(x):
+    return x * (x > 0.)
+
+def square(x):
+    return T.square(x)
+
+# Obsolete:
 
 
 class MinNormMaxoutConvC01B(MaxoutConvC01B):
@@ -1317,3 +1803,5 @@ class MinNormMaxoutConvC01B(MaxoutConvC01B):
                                        max_kernel_norm)
                 updates[W] = updated_W * (
                     desired_norms / (1e-7 + row_norms)).dimshuffle('x', 'x', 'x', 0)
+
+

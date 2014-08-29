@@ -8,7 +8,10 @@ __license__ = "3-clause BSD"
 __maintainer__ = "Ian Goodfellow"
 __email__ = "goodfeli@iro"
 
+import logging
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class TrainExtension(object):
@@ -95,13 +98,14 @@ class SharedSetter(TrainExtension):
     means run x.set_value(cast(y))
 
     after i epochs have passed.
-
-    Parameters
-    ----------
-    epoch_updates : WRITEME
     """
 
     def __init__(self, epoch_updates):
+        """
+        .. todo::
+
+            WRITEME
+        """
         self._count = 0
         self._epoch_to_updates = {}
         self._vars = set([])
@@ -126,8 +130,11 @@ class SharedSetter(TrainExtension):
             # isn't necessary
             hack = monitor.channels.values()[0]
             for var in self._vars:
-                monitor.add_channel(name=var.name, val=var,
-                                    ipt=hack.graph_input, dataset=hack.dataset)
+                if var.name not in monitor.channels:
+                    monitor.add_channel(name=var.name, val=var,
+                                        ipt=hack.graph_input,
+                                        dataset=hack.dataset,
+                                        data_specs=hack.dataset.data_specs)
 
 
         if self._count in self._epoch_to_updates:
@@ -146,15 +153,14 @@ class ChannelSmoother(TrainExtension):
     support this kind of channel directly instead of hacking it in.
     Note that the Monitor will print this channel as having a value of -1, and
     then the extension will print the right value.
-
-    Parameters
-    ----------
-    channel_to_smooth : WRITEME
-    channel_to_publish : WRITEME
-    k : WRITEME
     """
 
     def __init__(self, channel_to_smooth, channel_to_publish, k=5):
+        """
+        .. todo::
+
+            WRITEME
+        """
         self.__dict__.update(locals())
         del self.self
 
@@ -191,4 +197,4 @@ class ChannelSmoother(TrainExtension):
         mean = sum(values) / float(len(values))
 
         self.out_ch.val_record[-1] = mean
-        print '\t' + self.channel_to_publish + ': ' + str(mean)
+        logger.info('\t %s: %d', self.channel_to_publish, mean)

@@ -19,24 +19,18 @@ N = np
 
 
 class MND(object):
-    """
-    A Multivariate Normal Distribution
-
-    .. todo::
-
-        WRITEME properly
-    
-    Parameters
-    -----------
-    sigma : WRITEME
-        A numpy ndarray of shape (n,n)
-    mu : WRITEME
-        A numpy ndarray of shape (n,)
-    seed : WRITEME
-        The seed for the theano random number generator used to sample from
-        this distribution
-    """
+    """A Multivariate Normal Distribution"""
     def __init__(self, sigma, mu, seed=42):
+        """
+        .. todo::
+
+            WRITEME properly
+        
+        Parameters
+        -----------
+        sigma: a numpy ndarray of shape (n,n)
+        mu: a numpy ndarray of shape (n,)
+        seed: the seed for the theano random number generator used to sample from this distribution"""
         self.sigma = sigma
         self.mu = mu
         if not (len(mu.shape) == 1):
@@ -107,15 +101,22 @@ def fit(dataset, n_samples=None):
 
 class AdditiveDiagonalMND:
     """
-    A conditional distribution that adds gaussian noise with diagonal precision
-    matrix beta to another variable that it conditions on
+    .. todo::
 
-    Parameters
-    ----------
-    init_beta : WRITEME
-    nvis : WRITEME
+        WRITEME
     """
     def __init__(self, init_beta, nvis):
+        """
+        .. todo::
+
+            WRITEME properly
+
+        A conditional distribution that adds
+        gaussian noise with diagonal precision
+        matrix beta to another variable that it
+        conditions on
+        """
+
         self.__dict__.update(locals())
         del self.self
 

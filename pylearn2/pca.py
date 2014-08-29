@@ -1,4 +1,5 @@
 # Standard library imports
+import logging
 import sys
 
 # Third-party imports
@@ -28,6 +29,9 @@ from theano.sparse import SparseType, structured_dot
 from scipy import linalg
 from scipy.sparse.csr import csr_matrix
 
+
+logger = logging.getLogger(__name__)
+
 try:
     from scipy.sparse.linalg import eigen_symmetric
 except ImportError:
@@ -35,12 +39,12 @@ except ImportError:
     try:
         from scipy.sparse.linalg import eigsh as eigen_symmetric
     except ImportError:
-        # TODO: change this to use warn()
-        print ("couldn't import eigsh / eigen_symmetric from "
-               "scipy.linalg.sparse, some of your pca functions "
-               "may randomly fail later")
-        print ("the fact that somebody is using this doesn't bode well "
-               " since it's unlikely that the covariance matrix is sparse")
+        logger.exception("couldn't import eigsh / eigen_symmetric from "
+                         "scipy.linalg.sparse, some of your pca functions "
+                         "may randomly fail later")
+        logger.exception("the fact that somebody is using this "
+                         "doesn't bode well since it's unlikely that the "
+                         "covariance matrix is sparse")
 
 
 # Local imports
@@ -54,20 +58,23 @@ class _PCABase(Block):
 
     This class is not intended to be instantiated directly. Use a subclass to
     select a particular PCA implementation.
-
-    Parameters
-    ----------
-    num_components : int
-        This many components will be preserved, in decreasing order of variance
-        (default None keeps all)
-    min_variance : float
-        Components with normalized variance [0-1] below this threshold will be
-        discarded
-    whiten : bool
-        Whether or not to divide projected features by their standard deviation
     """
 
     def __init__(self, num_components=None, min_variance=0.0, whiten=False):
+        """
+        Parameters
+        ----------
+        num_components : int
+            This many components will be preserved, in decreasing order of \
+            variance (default None keeps all)
+        min_variance : float
+            Components with normalized variance [0-1] below this threshold \
+            will be discarded
+        whiten : bool
+            Whether or not to divide projected features by their standard \
+            deviation
+        """
+
         super(_PCABase, self).__init__()
 
         self.num_components = num_components
@@ -251,12 +258,13 @@ class SparseMatPCA(_PCABase):
     Does PCA on sparse  matrices. Does not do online PCA. This is for the case
     where `X - X.mean()` does not fit in memory (because it's dense) but
     `N.dot((X-X.mean()).T, X-X.mean())` does.
-
-    Parameters
-    ----------
-    batch_size : WRITEME
     """
     def __init__(self, batch_size=50, **kwargs):
+        """
+        .. todo::
+
+            WRITEME
+        """
         super(SparseMatPCA, self).__init__(**kwargs)
         self.minibatch_size = batch_size
 
@@ -280,7 +288,7 @@ class SparseMatPCA(_PCABase):
         batch_size = self.minibatch_size
 
         for i in xrange(0, n, batch_size):
-            print '\tprocessing example', str(i)
+            logger.info('\tprocessing example %d', i)
             end = min(n, i + batch_size)
             x = X[i:end, :].todense() - self.mean_
             assert x.shape[0] == end - i
@@ -292,7 +300,7 @@ class SparseMatPCA(_PCABase):
 
         cov /= n
 
-        print 'computing eigens'
+        logger.info('computing eigens')
         v, W = linalg.eigh(cov, eigvals=(d - self.num_components, d - 1))
 
         # The resulting components are in *ascending* order of eigenvalue, and
@@ -319,7 +327,7 @@ class SparseMatPCA(_PCABase):
         assert sparse.issparse(X)
 
         # Compute feature means.
-        print 'computing mean'
+        logger.info('computing mean')
         self.mean_ = numpy.asarray(X.mean(axis=0))[0, :]
 
         super(SparseMatPCA, self).train(X, mean=self.mean_)
@@ -357,12 +365,13 @@ class SparseMatPCA(_PCABase):
 class OnlinePCA(_PCABase):
     """
     Online PCA implementation.
-
-    Parameters
-    ----------
-    minibatch_size : WRITEME
     """
     def __init__(self, minibatch_size=500, **kwargs):
+        """
+        .. todo::
+
+            WRITEME
+        """
         super(OnlinePCA, self).__init__(**kwargs)
         self.minibatch_size = minibatch_size
 
@@ -386,12 +395,11 @@ class OnlinePCA(_PCABase):
             centering=False
         )
 
-        print >> sys.stderr, '*' * 50
+        logger.info('*' * 50)
         for i in range(X.shape[0]):
             if (i + 1) % (X.shape[0] / 50) == 0:
-                sys.stderr.write('|')  # suppresses newline/whitespace.
+                logger.info('|')  # suppresses newline/whitespace.
             pca_estimator.observe(X[i, :])
-        print >> sys.stderr
 
         v, W = pca_estimator.getLeadingEigen()
 
@@ -406,12 +414,13 @@ class Cov:
     A covariance estimator that computes the covariance in small batches
     instead of with one huge matrix multiply, in order to prevent memory
     problems. Its call method has the same functionality as `numpy.cov`.
-
-    Parameters
-    ----------
-    batch_size : WRITEME
     """
     def __init__(self, batch_size):
+        """
+        .. todo::
+
+            WRITEME
+        """
         self.batch_size = batch_size
 
     def __call__(self, X):
@@ -435,12 +444,13 @@ class CovEigPCA(_PCABase):
     .. todo::
 
         WRITEME
-
-    Parameters
-    ----------
-    cov_batch_size : WRITEME
     """
     def __init__(self, cov_batch_size=None, **kwargs):
+        """
+        .. todo::
+
+            WRITEME
+        """
         super(CovEigPCA, self).__init__(**kwargs)
         if cov_batch_size is not None:
             self.cov = Cov(cov_batch_size)
@@ -504,9 +514,9 @@ class SparsePCA(_PCABase):
 
             WRITEME
         """
-        print >> sys.stderr, ('WARNING: You should probably be using '
-                              'SparseMatPCA, unless your design matrix fits '
-                              'in memory.')
+        logger.warning('You should probably be using '
+                       'SparseMatPCA, unless your design matrix fits '
+                       'in memory.')
 
         n, d = X.shape
         # Can't subtract a sparse vector from a sparse matrix, apparently,
@@ -605,20 +615,16 @@ class PcaOnlineEstimator(object):
         pca_esti.observe(samples[i])
 
       [eigvals, eigvecs] = pca_esti.getLeadingEigen()
-
-    Parameters
-    ----------
-    n_dim : WRITEME
-    n_eigen : WRITEME
-    minibatch_size : WRITEME
-    gamma : WRITEME
-    regularizer : WRITEME
-    centering : WRITEME
     """
 
 
     def __init__(self, n_dim, n_eigen=10, minibatch_size=25, gamma=0.999,
                  regularizer=1e-6, centering=True):
+        """
+        .. todo::
+
+            WRITEME
+        """
         # dimension of the observations
         self.n_dim = n_dim
         # rank of the low-rank estimate
@@ -849,8 +855,8 @@ if __name__ == "__main__":
     # comprehensions
     train_data, valid_data, test_data = map(lambda(x):
                                             x.get_value(borrow=True), data)
-    print >> sys.stderr, "Dataset shapes:", map(lambda(x):
-                                                x.get_value().shape, data)
+    logger.info("Dataset shapes: %s", map(lambda(x):
+                                             x.get_value().shape, data))
     # PCA base-class constructor arguments.
     conf = {
         'num_components': args.num_components,
@@ -874,7 +880,7 @@ if __name__ == "__main__":
     if args.load_file:
         pca = Block.load(args.load_file)
     else:
-        print "... computing PCA"
+        logger.info("... computing PCA")
         pca = PCAImpl(**conf)
         pca.train(train_data)
         # Save the computed transformation.
@@ -885,6 +891,6 @@ if __name__ == "__main__":
     pca_transform = theano.function([inputs], pca(inputs))
     valid_pca = pca_transform(valid_data)
     test_pca = pca_transform(test_data)
-    print >> sys.stderr, "New shapes:", map(numpy.shape, [valid_pca, test_pca])
+    logger.info("New shapes: %s", map(numpy.shape, [valid_pca, test_pca]))
 
     # TODO: Compute ALC here when the code using the labels is ready.

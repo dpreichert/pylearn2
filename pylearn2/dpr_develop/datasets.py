@@ -25,9 +25,17 @@ from pylearn2.utils.iteration import (
     resolve_iterator_class
 )
 from pylearn2.utils import safe_zip
-from pylearn2.base import Block
+from pylearn2.blocks import Block
 
 from pylearn2.dpr_train import paths
+
+import logging
+
+# This:
+# top_level_logger = logging.getLogger(__name__.split('.')[0])
+# might be a better way but it doesn't work if I run this file as a script.
+
+pl2_logger = logging.getLogger('pylearn2')
 
 
 def handle_image(image_path, resize_to=None, resize_short_dim=True):
@@ -60,7 +68,7 @@ def handle_image(image_path, resize_to=None, resize_short_dim=True):
         # Grayscale to RGB.
         img = np.dstack([img, img, img])
     elif img.shape[2] == 4:
-        print 'removing alpha: %s' % image_path
+        pl2_logger.info('removing alpha: %s' % image_path)
         img = img[:, :, :3]
 
     return img
@@ -234,9 +242,9 @@ def prepare_hdf5_data(base_dir, dirs_to_use=None, h5_filename=None,
                     except IOError:
                         current_data = pl2serial.load(current_path)
                     except:
-                        print('Could not open %s either with Image or '
-                              'pylearn2 serial, and no custom file handler '
-                              'was provided for this directory. ' % filename)
+                        pl2_logger.info('Could not open %s either with Image or '
+                                        'pylearn2 serial, and no custom file handler '
+                                        'was provided for this directory. ' % filename)
                         raise
 
                 if dataset is None:
@@ -381,7 +389,7 @@ def make_hdf5_from_dataset(dataset, h5_path, iter_batch_size=100,
                 assert False
 
         examples_seen += iter_batch_size
-        print examples_seen
+        pl2_logger.info(examples_seen)
         first_batch = False
     # Last batch might not be full
     assert it.num_examples <= examples_seen and \
@@ -545,7 +553,9 @@ def make_vector_spaces_dataset_from_h5(
     on disk in the h5 file.
 
     num_examples: only take the first num_examples from the h5 datasets. Currently
-    requires load_into_memory == True.
+    requires load_into_memory == True. Alternatively, the number of examples returned
+    by the resulting dataset can also be changed by setting the latters' dataset_size
+    attribute.
     """
     if num_examples is not None:
         if not load_into_memory:
@@ -553,8 +563,8 @@ def make_vector_spaces_dataset_from_h5(
 
     if axes != ('b', 0, 1, 'c'):
         # Todo: find a solution
-        print('Warning: pylearn2 iteration assumes the underlying data is stored '
-              'with the batch axis first.')
+        pl2_logger.info('Warning: pylearn2 iteration assumes the underlying data is stored '
+                        'with the batch axis first.')
 
     h5_file = h5py.File(h5_path, 'r')
     component_spaces = []
@@ -990,9 +1000,9 @@ class PatchExtractorDataset(Dataset):
         num_raw_used_per_raw_it = (raw_iterator.num_examples // raw_batch_size) * raw_batch_size
 
         if num_raw_used_per_raw_it != raw_iterator.num_examples:
-            print('Patch extractor warning: raw dataset size is not divisible by '
-                  'raw batch size (computed as batch_size / num_patches_per_raw). '
-                  '%i raw examples will potentially not be used.'
+            pl2_logger.info('Patch extractor warning: raw dataset size is not divisible by '
+                            'raw batch size (computed as batch_size / num_patches_per_raw). '
+                            '%i raw examples will potentially not be used.'
                   % (raw_iterator.num_examples - num_raw_used_per_raw_it))
         num_patches = num_raw_used_per_raw_it * self.num_raw_iterations * self.num_patches_per_raw
 
@@ -1650,7 +1660,7 @@ class SlidingWindowTransformer(object):
 
 
     def compile_mlp_theano(self):
-        print("SlidingWindowTransformer: compiling window mlp fprop.")
+        pl2_logger.info("SlidingWindowTransformer: compiling window mlp fprop.")
         assert is_flat_space(self.get_input_space())
         inputs = self.get_input_space().make_theano_batch()
         if isinstance(self.get_input_space(), CompositeSpace):

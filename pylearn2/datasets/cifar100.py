@@ -11,16 +11,7 @@ class CIFAR100(dense_design_matrix.DenseDesignMatrix):
     """
     The CIFAR-100 dataset.
 
-    Parameters
-    ----------
-    which_set : WRITEME
-    center : WRITEME
-    gcn : WRITEME
-    toronto_prepro : WRITEME
-    axes : WRITEME
-    start : WRITEME
-    stop : WRITEME
-    one_hot : WRITEME
+    TODO: write parameters list
     """
     def __init__(self, which_set, center = False,
             gcn = None, toronto_prepro = False,

@@ -1,6 +1,7 @@
 """Support code for YAML parsing of experiment descriptions."""
 import re
 import yaml
+import logging
 from pylearn2.utils.call_check import checked_call
 from pylearn2.utils import serial
 from pylearn2.utils.string_utils import preprocess
@@ -10,6 +11,7 @@ import warnings
 
 is_initialized = False
 additional_environ = None
+logger = logging.getLogger(__name__)
 
 def load(stream, overrides=None, environ=None, **kwargs):
     """
@@ -174,14 +176,13 @@ class ObjectProxy(object):
     """
     Class used to delay instantiation of objects so that overrides can be
     applied.
-
-    Parameters
-    ----------
-    cls : WRITEME
-    kwds : WRITEME
-    yaml_src : WRITEME
     """
     def __init__(self, cls, kwds, yaml_src):
+        """
+        .. todo::
+
+            WRITEME
+        """
         self.cls = cls
         self.kwds = kwds
         self.yaml_src = yaml_src
@@ -407,6 +408,6 @@ if __name__ == "__main__":
     }"""
     # yaml.load can take a string or a file object
     loaded = yaml.load(yamlfile)
-    print loaded
+    logger.info(loaded)
     # These two things should be the same object
     assert loaded['corruptor'] is loaded['dae'].corruptor

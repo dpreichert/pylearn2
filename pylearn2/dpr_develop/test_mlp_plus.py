@@ -15,8 +15,6 @@ def test_conv_rectified_linear_equivalent():
     input_np = 1. * np.arange(11*11*3*6,dtype='float32').reshape(3, 11, 11, 6)
     input_np = input_np / input_np.max() * 100
 
-    def rectify(x):
-        return x * (x > 0.)
 
     # I'd test mean pooling but that's buggy (gives nans for this setting).
     for pool_type in ['max']:
@@ -34,7 +32,7 @@ def test_conv_rectified_linear_equivalent():
                     irange = .05,
                     kernel_shape = [5, 5],
                     kernel_stride = [2, 2],
-                    activation_function = rectify),
+                    activation_function = mlp_plus.rectify),
                 mlp_plus.PoolBC10(
                     layer_name='h0_pool',
                     pool_shape = [3, 3],

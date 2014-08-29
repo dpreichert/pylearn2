@@ -285,14 +285,14 @@ class Model(object):
         Returns a string, stating the source for the input. By default the
         input source (when is the only one) is called 'features'.
         """
-        return 'features'
+        return self.input_source
 
     def get_target_source(self):
         """
         Returns a string, stating the source for the output. By default the
         output source (when is the only one) is called 'targets'.
         """
-        return 'targets'
+        return self.target_source
 
     def free_energy(self, V):
         """
@@ -441,6 +441,11 @@ class Model(object):
 
     def __init__(self):
         self.names_to_del = set()
+
+        # DPR: added default sources as attributes; should possibly moved to
+        # concrete model classes like MLP.
+        self.input_source = 'features'
+        self.target_source = 'targets'
 
     def get_test_batch_size(self):
         """

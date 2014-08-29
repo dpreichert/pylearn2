@@ -39,12 +39,16 @@ class Monitor(object):
     quantities of interest (examples: the objective function, measures of
     hidden unit activity, reconstruction error, sum of squared second
     derivatives, average norm of the weight vectors,  etc.)
-
-    Parameters
-    ----------
-    model : `pylearn2.models.model.Model`
     """
     def __init__(self, model):
+        """
+        Makes a monitor for `model`. Assumes the model has not been trained at
+        all yet.
+
+        Parameters
+        ----------
+        model : pylearn2.models.model.Model instance
+        """
         self.training_succeeded = False
         self.model = model
         self.channels = OrderedDict()
@@ -255,6 +259,12 @@ class Monitor(object):
             channel.example_record.append(self._examples_seen)
             channel.epoch_record.append(self._epochs_seen)
             val = channel.val_shared.get_value()
+            # DPR temp fix for gpu shared vars returning arrays
+            if isinstance(val, np.ndarray):
+                if val.shape == ():
+                    val = np.float(val)
+                else:
+                    raise NotImplementedError #unexpected case
             channel.val_record.append(val)
             # TODO: use logging infrastructure so that user can configure
             # formatting
@@ -897,26 +907,29 @@ class Monitor(object):
 class MonitorChannel(object):
     """
     A class representing a specific quantity to be monitored.
-
-    Parameters
-    ----------
-    graph_input : tensor_like
-        The symbolic tensor which should be clamped to the data.
-    val : tensor_like
-        The value (symbolic function of `graph_input`) to be evaluated
-        and recorded.
-    name : str
-        The display name in the monitor.
-    data_specs : (space, source) pair
-        Identifies the order, format and semantics of graph_input
-    prereqs : list of callables
-        Callables that take numpy tensors each prereq must be called \
-        exactly once per each new batch of data before the channel value \
-        is computed if two channels provide a prereq with exactly the \
-        same id, that prereq will only be called once
     """
     def __init__(self, graph_input, val, name, data_specs, dataset,
                  prereqs=None):
+        """
+        Creates a channel for a quantity to be monitored.
+
+        Parameters
+        ----------
+        graph_input : tensor_like
+            The symbolic tensor which should be clamped to the data.
+        val : tensor_like
+            The value (symbolic function of `graph_input`) to be evaluated
+            and recorded.
+        name : str
+            The display name in the monitor.
+        data_specs : (space, source) pair
+            Identifies the order, format and semantics of graph_input
+        prereqs : list of callables
+            Callables that take numpy tensors each prereq must be called \
+            exactly once per each new batch of data before the channel value \
+            is computed if two channels provide a prereq with exactly the \
+            same id, that prereq will only be called once
+        """
         self.name = name
         self.prereqs = prereqs
         self.graph_input = graph_input

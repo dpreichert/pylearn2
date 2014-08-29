@@ -53,15 +53,18 @@ class ParzenWindows(object):
     .. todo::
 
         WRITEME
-
-    Parameters
-    ----------
-    samples : numpy matrix
-        See description for make_lpdf
-    sigma : scalar
-        See description for make_lpdf
     """
     def __init__(self, samples, sigma):
+        """
+        Create a ParzenWindows estimator for samples.
+
+        Parameters
+        ----------
+        samples : numpy matrix
+            See description for make_lpdf
+        sigma : scalar
+            See description for make_lpdf
+        """
         # just keeping these for debugging/examination, not needed
         self._samples = samples
         self._sigma = sigma

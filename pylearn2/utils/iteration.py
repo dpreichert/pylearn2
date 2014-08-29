@@ -244,6 +244,67 @@ class ShuffledSequentialSubsetIterator(SequentialSubsetIterator):
             return rval
 
 
+
+
+class SortedShuffledSequentialSubsetIterator(SequentialSubsetIterator):
+    """
+    Like ShuffledSequentialSubsetIterator, but returned indeces are compatible
+    with h5py datasets as arrays, by making sure that:
+
+    * returned indices are list, not array;
+    * indices are sorted in increasing order (i.e., batches will be populated
+      with random datapoints, but there will be an ordering within each batch).
+
+    ShuffledSequentialSubsetIterator could probably be adapted safely to match
+    those requirements (but perhaps the ordering is undesired in some
+    unexpected scenarios).
+    """
+    stochastic = True
+    fancy = True
+
+    def __init__(self, dataset_size, batch_size, num_batches, rng=None):
+        """
+        .. todo::
+
+            WRITEME
+        """
+        super(SortedShuffledSequentialSubsetIterator, self).__init__(
+            dataset_size,
+            batch_size,
+            num_batches,
+            None
+        )
+        if rng is not None and hasattr(rng, 'random_integers'):
+            self._rng = rng
+        else:
+            self._rng = numpy.random.RandomState(rng)
+        self._shuffled = numpy.arange(self._dataset_size)
+        self._rng.shuffle(self._shuffled)
+
+    def next(self):
+        """
+        .. todo::
+
+            WRITEME
+        """
+        if self._batch >= self.num_batches or self._idx >= self._dataset_size:
+            raise StopIteration()
+
+        # this fix the problem where dataset_size % batch_size != 0
+        elif (self._idx + self._batch_size) > self._dataset_size:
+            rval = self._shuffled[self._idx: self._dataset_size].tolist()
+            rval.sort()
+            self._idx = self._dataset_size
+            return rval
+        else:
+            rval = self._shuffled[self._idx: self._idx + self._batch_size].tolist()
+            rval.sort()
+            self._idx += self._batch_size
+            self._batch += 1
+            return rval
+
+
+
 class RandomUniformSubsetIterator(SubsetIterator):
     """
     .. todo::
@@ -394,6 +455,7 @@ class BatchwiseShuffledSequentialIterator(SequentialSubsetIterator):
 _iteration_schemes = {
     'sequential': SequentialSubsetIterator,
     'shuffled_sequential': ShuffledSequentialSubsetIterator,
+    'sorted_shuffled_sequential': SortedShuffledSequentialSubsetIterator,
     'random_slice': RandomSliceSubsetIterator,
     'random_uniform': RandomUniformSubsetIterator,
     'batchwise_shuffled_sequential': BatchwiseShuffledSequentialIterator,
