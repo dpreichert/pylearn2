@@ -1,3 +1,8 @@
+pylearn2 with some additional functionality (work in progress).
+
+
+
+
 ==============================
 Pylearn2: A machine learning research library
 ==============================
